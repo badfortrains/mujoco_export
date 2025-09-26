@@ -8,6 +8,24 @@ import os
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
+_overrides = {
+    'robot_v5(Mirror)_1+Motor_mount_v5(Mirror)_1+mount(Mirror)_1Revolute_1': {
+        'axis': "0 0 1"
+    },
+    'robot_v5(Mirror)_1+Motor_mount_v5(Mirror)_2+mount(Mirror)_1Revolute_2': {
+        'axis': '0 1 0'
+    },
+    'left-leg_v10_1+Motor_mount_v7_1+mount_1Revolute_1': {
+        'axis': "0 0 1"
+    },
+    'left-leg_v10_1+Motor_mount_v7_2+mount_1Revolute_3': {
+        'axis': '0 1 0'
+    },
+    'body_1_mesh': {
+        'density': '150'
+    }
+}
+
 def _get_joints(component):
     joints = []
     for joint in component.joints:
@@ -70,15 +88,20 @@ def run(context):
         mujoco_root = Element('mujoco', model=design.rootComponent.name.replace(" ", "_"))
         default_element = SubElement(mujoco_root, 'default')
         SubElement(default_element, 'mesh', scale="0.001 0.001 0.001")
+        SubElement(default_element, 'geom', rgba="0.5 0.7 1.0 1")
+        SubElement(default_element, 'joint', damping="1")
+        SubElement(default_element, 'position', kp="14")
+
         asset_element = SubElement(mujoco_root, 'asset')
         actuator_element = SubElement(mujoco_root, 'actuator')
         worldbody_element = SubElement(mujoco_root, 'worldbody')
         
         # --- 5. Create a "world" body and base link ---
-        SubElement(worldbody_element, 'geom', type='plane', size='1 1 0.1')
+        SubElement(worldbody_element, 'geom', type='plane', size='1 1 0.1', rgba="0.9 0.9 0.9 1")
+        SubElement(worldbody_element, 'light', mode="targetbodycom", target="body",diffuse=".8 .8 .8", specular="0.3 0.3 0.3", pos="0 -6 4", cutoff="30" )
 
         # Create the body for the base link
-        base_link_body_element = SubElement(worldbody_element, 'body', name='body', pos='0 0 .139')
+        base_link_body_element = SubElement(worldbody_element, 'body', name='body', pos='0 0 .17355')
 
         SubElement(base_link_body_element, 'freejoint', name="root")
         
@@ -93,12 +116,6 @@ def run(context):
             every_joint.append(joint)
         for joint in root_comp.allAsBuiltJoints:
             every_joint.append(joint)
-
-        print('everything!!!')
-        for joint in every_joint:
-            print(f"{joint.occurrenceOne.fullPathName}  ------- {joint.occurrenceTwo.fullPathName if joint.occurrenceTwo else ''}")
-        print('DONE!')
-
 
         build_robot_tree(base_link_occurrence, base_link_body_element, asset_element, mesh_folder, ui, root_comp, every_joint, seen_links, actuator_element)
 
@@ -147,16 +164,18 @@ def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_
                 pos_y = joint_origin.y / 100.0
                 pos_z = joint_origin.z / 100.0
                 pos_str = f'{pos_x:.4f} {pos_y:.4f} {pos_z:.4f}'
-                join_name = child_body_name + joint.name
+                joint_name = child_body_name + joint.name.replace(':', '_').replace(' ', '_')
                 # --- Create Joint inside Child Body ---
                 # The joint is at the origin of the child body's frame
                 if joint.jointMotion.jointType != adsk.fusion.JointTypes.RigidJointType:
                     SubElement(child_body_element, 'joint', 
-                            name=join_name, 
+                            name=joint_name, 
                             type=get_mujoco_joint_type(joint.jointMotion.jointType),
                             pos=pos_str,
-                            axis='1 0 0') # Default axis, you may need to derive this
-                    SubElement(actuator_element, "position", name=join_name, joint=join_name)
+                            attrib=_get_overrides({
+                                    'axis': '1 0 0',
+                                },joint_name)) # Default axis, you may need to derive this
+                    SubElement(actuator_element, "position", name=joint_name, joint=joint_name)
 
             # --- Export Mesh for the Child Component and add geom ---
             export_mesh(child_occurrence, asset_element, child_body_element, mesh_folder, root_comp)
@@ -176,6 +195,10 @@ def get_all_joints(component: adsk.fusion.Component):
         all_joints.append(aj)
     
     return all_joints
+
+def _get_overrides(attributes, key):
+    overides = _overrides[key] if key in _overrides else {}
+    return attributes | overides
 
 def export_mesh(occurance, asset_element, body_element, mesh_folder, root_comp):
     """
@@ -204,7 +227,8 @@ def export_mesh(occurance, asset_element, body_element, mesh_folder, root_comp):
 
     SubElement(body_element, 'geom', 
                type='mesh', 
-               mesh=mesh_asset_name)
+               mesh=mesh_asset_name,
+               attrib=_get_overrides({},mesh_asset_name))
     occurance.isIsolated = False
 
 
