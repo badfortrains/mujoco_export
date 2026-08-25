@@ -38,6 +38,30 @@ def _get_joints(component):
             joints.append(joint)
         
     return joints
+
+
+def _joint_occurrences(joint):
+    """Return the two occurrence proxies referenced by a joint."""
+    return joint.occurrenceOne, joint.occurrenceTwo
+
+
+def _find_joint_occurrence(all_joints, full_path_name):
+    """Find an occurrence proxy by its path in the root assembly context."""
+    for joint in all_joints:
+        for occurrence in _joint_occurrences(joint):
+            if occurrence and occurrence.fullPathName == full_path_name:
+                return occurrence
+    return None
+
+
+def _joint_occurrence_paths(all_joints):
+    """Return the occurrence paths referenced by the supplied joints."""
+    return sorted({
+        occurrence.fullPathName
+        for joint in all_joints
+        for occurrence in _joint_occurrences(joint)
+        if occurrence
+    })
         
 
 def run(context):
@@ -50,23 +74,40 @@ def run(context):
             ui.messageBox('No active design', 'No Design')
             return
 
-        # --- 1. Get user input for root component name ---
-        # (root_comp_name, cancelled) = ui.inputBox('Enter the name of the root component (e.g., torso)', 'Root Component Name')
-        # if cancelled or not root_comp_name:
-        #     return
+        # --- 1. Configure the occurrence paths that make up the base link ---
+        base_link_full_paths = [
+            'body:1+motorMountU v7:3',
+            'body:1+motorMountU v7(Mirror):1'
+        ]
 
-        # --- 2. Find the root component occurrence ---
-        root_comp_name = 'body'
+        # --- 2. Find the base occurrences through the root-context joints ---
         root_comp = design.rootComponent
-        base_link_occurrence = None
-        for occ in root_comp.occurrences:
-            # Using component.name to match, as occurrence.name can be unique
-            if occ.component.name == root_comp_name:
-                base_link_occurrence = occ
-                break
-        
-        if not base_link_occurrence:
-            ui.messageBox(f'Component  not found as a direct occurrence in the root of the design.')
+
+        every_joint = []
+        for joint in root_comp.allJoints:
+            every_joint.append(joint)
+        for joint in root_comp.allAsBuiltJoints:
+            every_joint.append(joint)
+
+        base_link_occurrences = []
+        missing_base_link_paths = []
+        for full_path in dict.fromkeys(base_link_full_paths):
+            occurrence = _find_joint_occurrence(every_joint, full_path)
+            if occurrence:
+                base_link_occurrences.append(occurrence)
+            else:
+                missing_base_link_paths.append(full_path)
+
+        if not base_link_full_paths:
+            ui.messageBox('At least one base-link occurrence path is required.')
+            return
+
+        if missing_base_link_paths:
+            missing_paths = '\n'.join(missing_base_link_paths)
+            referenced_paths = '\n'.join(_joint_occurrence_paths(every_joint))
+            ui.messageBox(
+                f'No joint references these base-link occurrences:\n{missing_paths}'
+                f'\n\nOccurrence paths referenced by joints:\n{referenced_paths}')
             return
 
         # --- 3. User Input for Export Directory ---
@@ -79,7 +120,7 @@ def run(context):
         # else:
         #     return
 
-        export_folder = '/Users/shpurcell/Documents/code/mujoco_test_export'
+        export_folder = '/Users/suzanna/Documents/code/rick_v2'
         mesh_folder = os.path.join(export_folder, 'meshes')
         if not os.path.exists(mesh_folder):
             os.makedirs(mesh_folder)
@@ -105,19 +146,15 @@ def run(context):
 
         SubElement(base_link_body_element, 'freejoint', name="root")
         
-        # Export the mesh for the base link
-        export_mesh(base_link_occurrence, asset_element, base_link_body_element, mesh_folder, root_comp)
+        # Export each occurrence that makes up the base link into the same XML body.
+        for base_link_occurrence in base_link_occurrences:
+            export_mesh(base_link_occurrence, asset_element, base_link_body_element, mesh_folder, root_comp)
 
         # --- 6. Recursively build the robot tree from joints ---
         seen_links = set()
 
-        every_joint = []
-        for joint in root_comp.allJoints:
-            every_joint.append(joint)
-        for joint in root_comp.allAsBuiltJoints:
-            every_joint.append(joint)
-
-        build_robot_tree(base_link_occurrence, base_link_body_element, asset_element, mesh_folder, ui, root_comp, every_joint, seen_links, actuator_element)
+        for base_link_occurrence in base_link_occurrences:
+            build_robot_tree(base_link_occurrence, base_link_body_element, asset_element, mesh_folder, ui, root_comp, every_joint, seen_links, actuator_element)
 
 
         # --- 7. Write the XML file ---
@@ -139,12 +176,30 @@ def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_
     """
     Recursively finds child components connected by joints and builds the XML structure.
     """
+    parent_path = parent_occurrence.fullPathName
+    print(parent_path)
+
     for joint in all_joints:
-        if not joint.occurrenceTwo:
+        occurrence_one, occurrence_two = _joint_occurrences(joint)
+        if not occurrence_one or not occurrence_two:
             continue
 
-        if (joint.occurrenceOne == parent_occurrence or joint.occurrenceTwo == parent_occurrence) and joint.entityToken not in seen_links:
-            child_occurrence = joint.occurrenceTwo if joint.occurrenceTwo != parent_occurrence else joint.occurrenceOne
+        occurrence_one_path = occurrence_one.fullPathName
+        occurrence_two_path = occurrence_two.fullPathName
+        print(f"occurenceOne : {occurrence_one_path} occurance two: {occurrence_two_path}")
+
+    for joint in all_joints:
+        occurrence_one, occurrence_two = _joint_occurrences(joint)
+        if not occurrence_one or not occurrence_two:
+            continue
+
+        occurrence_one_path = occurrence_one.fullPathName
+        occurrence_two_path = occurrence_two.fullPathName
+        if (parent_path in (occurrence_one_path, occurrence_two_path)
+                and joint.entityToken not in seen_links):
+            child_occurrence = (occurrence_two
+                                if occurrence_one_path == parent_path
+                                else occurrence_one)
 
             print(f"found child!! {child_occurrence.fullPathName}")
             seen_links.add(joint.entityToken)
@@ -245,4 +300,3 @@ def get_mujoco_joint_type(fusion_joint_type):
     else:
         # Default to a hinge joint if type is not supported for simplicity
         return 'hinge'
-
