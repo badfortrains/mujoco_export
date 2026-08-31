@@ -100,10 +100,8 @@ def _format_mujoco_vector(values):
     return ' '.join(_format_axis_component(value) for value in values)
 
 
-def _get_foot_box(occurrence):
-    """Return the contact-box center, half-size, and sole center in meters."""
-    # Fusion uses centimeters internally. The occurrence bounds are in the root
-    # assembly context, matching the root-context STL export used below.
+def _get_occurrence_bounding_box(occurrence):
+    """Return an occurrence's tightest available root-context bounds."""
     try:
         bounding_box = occurrence.preciseBoundingBox
     except AttributeError:
@@ -115,13 +113,29 @@ def _get_foot_box(occurrence):
         raise ValueError(
             f'Could not calculate a bounding box for {occurrence.fullPathName}')
 
+    return bounding_box
+
+
+def _get_occurrence_center(occurrence):
+    """Return an occurrence's bounding-box center in MuJoCo meters."""
+    bounding_box = _get_occurrence_bounding_box(occurrence)
     minimum = bounding_box.minPoint
     maximum = bounding_box.maxPoint
-    center = tuple(
+    return tuple(
         (min_value + max_value) / 200.0
         for min_value, max_value in zip(
             (minimum.x, minimum.y, minimum.z),
             (maximum.x, maximum.y, maximum.z)))
+
+
+def _get_foot_box(occurrence):
+    """Return the contact-box center, half-size, and sole center in meters."""
+    # Fusion uses centimeters internally. The occurrence bounds are in the root
+    # assembly context, matching the root-context STL export used below.
+    bounding_box = _get_occurrence_bounding_box(occurrence)
+    minimum = bounding_box.minPoint
+    maximum = bounding_box.maxPoint
+    center = _get_occurrence_center(occurrence)
     half_size = tuple(
         (max_value - min_value) / 200.0
         for min_value, max_value in zip(
@@ -161,7 +175,19 @@ def add_foot_contact_geometry(occurrence, body_element, side):
         size='0.003',
         type='sphere',
         rgba='1 0 0 1')
-        
+
+
+def add_imu_site(occurrence, body_element):
+    """Add an IMU site at the center of its component occurrence."""
+    SubElement(
+        body_element,
+        'site',
+        name='imu',
+        pos=_format_mujoco_vector(_get_occurrence_center(occurrence)),
+        size='0.003',
+        type='sphere',
+        rgba='0 1 0 1')
+
 
 def run(context):
     ui = None
@@ -185,6 +211,10 @@ def run(context):
             'foot:1+Component54:1': 'left',
             'foot(Mirror) (1):1+Component54(Mirror) (1):1': 'right'
         }
+
+        # The IMU site is placed at the center of this component's tight B-Rep
+        # bounds in the same root assembly frame used to export its mesh.
+        imu_full_path = 'body:1+imu:1'
 
         # --- 2. Find the base occurrences through the root-context joints ---
         root_comp = design.rootComponent
@@ -228,6 +258,13 @@ def run(context):
                 f'\n\nOccurrence paths referenced by joints:\n{referenced_paths}')
             return
 
+        if not _find_joint_occurrence(every_joint, imu_full_path):
+            referenced_paths = '\n'.join(_joint_occurrence_paths(every_joint))
+            ui.messageBox(
+                f'No joint references the IMU occurrence:\n{imu_full_path}'
+                f'\n\nOccurrence paths referenced by joints:\n{referenced_paths}')
+            return
+
         # --- 3. User Input for Export Directory ---
         # folder_dialog = ui.createFolderDialog()
         # folder_dialog.title = "Select Export Folder for MuJoCo Assets"
@@ -266,7 +303,7 @@ def run(context):
             kp='5',
             kv='0.02',
             forcelimited='true',
-            forcerange='-0.2 0.2',
+            forcerange='-0.1 0.1',
             ctrllimited='true',
             ctrlrange='-1.57 1.57')
 
@@ -300,7 +337,18 @@ def run(context):
         seen_links = set()
 
         for base_link_occurrence in base_link_occurrences:
-            build_robot_tree(base_link_occurrence, base_link_body_element, asset_element, mesh_folder, ui, root_comp, every_joint, seen_links, actuator_element, foot_full_paths)
+            build_robot_tree(
+                base_link_occurrence,
+                base_link_body_element,
+                asset_element,
+                mesh_folder,
+                ui,
+                root_comp,
+                every_joint,
+                seen_links,
+                actuator_element,
+                foot_full_paths,
+                imu_full_path)
 
         SubElement(
             worldbody_element,
@@ -327,7 +375,18 @@ def run(context):
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
 
-def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_folder, ui, root_comp, all_joints, seen_links, actuator_element, foot_full_paths):
+def build_robot_tree(
+        parent_occurrence,
+        parent_xml_element,
+        asset_element,
+        mesh_folder,
+        ui,
+        root_comp,
+        all_joints,
+        seen_links,
+        actuator_element,
+        foot_full_paths,
+        imu_full_path):
     """
     Recursively finds child components connected by joints and builds the XML structure.
     """
@@ -396,7 +455,21 @@ def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_
                 add_foot_contact_geometry(
                     child_occurrence, child_body_element, foot_side)
 
-            build_robot_tree(child_occurrence, child_body_element, asset_element, mesh_folder, ui, root_comp, all_joints, seen_links, actuator_element, foot_full_paths)
+            if child_occurrence.fullPathName == imu_full_path:
+                add_imu_site(child_occurrence, child_body_element)
+
+            build_robot_tree(
+                child_occurrence,
+                child_body_element,
+                asset_element,
+                mesh_folder,
+                ui,
+                root_comp,
+                all_joints,
+                seen_links,
+                actuator_element,
+                foot_full_paths,
+                imu_full_path)
 
 def get_all_joints(component: adsk.fusion.Component):
     """Return a combined list of joints and as-built joints for a component."""
