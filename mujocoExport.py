@@ -9,6 +9,13 @@ import os
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
+SERVO_COMPONENT_NAME = 'servo v10'
+SERVO_MASS_KG = 0.0134
+SOLID_PLA_DENSITY_KG_M3 = 1240
+PLA_INFILL_FRACTION = 0.15
+PLA_15_PERCENT_DENSITY_KG_M3 = (
+    SOLID_PLA_DENSITY_KG_M3 * PLA_INFILL_FRACTION)
+
 _overrides = {
     'robot_v5(Mirror)_1+Motor_mount_v5(Mirror)_1+mount(Mirror)_1Revolute_1': {
         'axis': "0 0 1"
@@ -21,9 +28,6 @@ _overrides = {
     },
     'left-leg_v10_1+Motor_mount_v7_2+mount_1Revolute_3': {
         'axis': '0 1 0'
-    },
-    'body_1_mesh': {
-        'density': '150'
     }
 }
 
@@ -179,7 +183,7 @@ def run(context):
         # to generate the foot contact boxes and sole-center sites.
         foot_full_paths = {
             'foot:1+Component54:1': 'left',
-            'foot(Mirror):1+Component54(Mirror):1': 'right'
+            'foot(Mirror) (1):1+Component54(Mirror) (1):1': 'right'
         }
 
         # --- 2. Find the base occurrences through the root-context joints ---
@@ -328,7 +332,6 @@ def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_
     Recursively finds child components connected by joints and builds the XML structure.
     """
     parent_path = parent_occurrence.fullPathName
-    print(parent_path)
 
     for joint in all_joints:
         occurrence_one, occurrence_two = _joint_occurrences(joint)
@@ -362,18 +365,19 @@ def build_robot_tree(parent_occurrence, parent_xml_element, asset_element, mesh_
 
             if isinstance(joint, adsk.fusion.Joint): 
                 print(joint.name)
+                print(parent_path)
                 # --- Get Joint Information for Child Body Position ---
-                joint_origin = joint.geometryOrOriginOne.origin
-                
-                # Convert Fusion's mm to MuJoCo's meters for the body position
-                pos_x = joint_origin.x / 100.0
-                pos_y = joint_origin.y / 100.0
-                pos_z = joint_origin.z / 100.0
-                pos_str = f'{pos_x:.4f} {pos_y:.4f} {pos_z:.4f}'
+
                 joint_name = child_body_name + joint.name.replace(':', '_').replace(' ', '_')
                 # --- Create Joint inside Child Body ---
                 # The joint is at the origin of the child body's frame
                 if joint.jointMotion.jointType != adsk.fusion.JointTypes.RigidJointType:
+                    joint_origin = joint.geometryOrOriginOne.origin
+                    # Convert Fusion's mm to MuJoCo's meters for the body position
+                    pos_x = joint_origin.x / 100.0
+                    pos_y = joint_origin.y / 100.0
+                    pos_z = joint_origin.z / 100.0
+                    pos_str = f'{pos_x:.4f} {pos_y:.4f} {pos_z:.4f}'
                     joint_axis = _get_mujoco_joint_axis(joint.jointMotion)
                     SubElement(child_body_element, 'joint', 
                             name=joint_name, 
@@ -412,6 +416,57 @@ def _get_overrides(attributes, key):
     overides = _overrides[key] if key in _overrides else {}
     return attributes | overides
 
+
+def _normalize_fusion_component_name(name):
+    """Remove Fusion instance, mirror, and duplicate-name suffixes."""
+    component_name = name.strip().casefold()
+
+    while True:
+        previous_name = component_name
+
+        name_without_instance, separator, instance_number = (
+            component_name.rpartition(':'))
+        if separator and instance_number.isdigit():
+            component_name = name_without_instance.rstrip()
+
+        if component_name.endswith(')'):
+            suffix_start = component_name.rfind('(')
+            duplicate_number = component_name[suffix_start + 1:-1]
+            if suffix_start >= 0 and duplicate_number.isdigit():
+                component_name = component_name[:suffix_start].rstrip()
+
+        print(f"stripped name {component_name}")
+        mirror_suffix = '(mirror)'
+        if component_name.endswith(mirror_suffix):
+            component_name = component_name[:-len(mirror_suffix)].rstrip()
+
+        if component_name == previous_name:
+            return component_name
+
+
+def _is_servo_occurrence(occurrence):
+    """Return whether an occurrence is an original or renamed mirror servo."""
+    component_names = [occurrence.component.name]
+    if occurrence.fullPathName:
+        component_names.append(occurrence.fullPathName.rsplit('+', 1)[-1])
+
+    normalized_names = [
+        _normalize_fusion_component_name(name) for name in component_names]
+    print(normalized_names)
+    return SERVO_COMPONENT_NAME.casefold() in normalized_names
+
+
+def _get_mesh_mass_attributes(occurrence):
+    """Return MuJoCo mass properties for an exported component occurrence."""
+    if _is_servo_occurrence(occurrence):
+        # MuJoCo mass values use kilograms.
+        return {'mass': f'{SERVO_MASS_KG:g}'}
+
+    # MuJoCo density values use kg/m^3. This treats the infill percentage as
+    # the printed part's solid-volume fraction.
+    return {'density': f'{PLA_15_PERCENT_DENSITY_KG_M3:g}'}
+
+
 def export_mesh(occurance, asset_element, body_element, mesh_folder, root_comp):
     """
     Exports a component's mesh as STL if it hasn't been exported yet.
@@ -440,7 +495,8 @@ def export_mesh(occurance, asset_element, body_element, mesh_folder, root_comp):
     SubElement(body_element, 'geom', 
                type='mesh', 
                mesh=mesh_asset_name,
-               attrib=_get_overrides({},mesh_asset_name))
+               attrib=_get_overrides(
+                   _get_mesh_mass_attributes(occurance), mesh_asset_name))
     occurance.isIsolated = False
 
 
